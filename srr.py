@@ -13,6 +13,57 @@ It intentionally writes to a separate computed workbook:
 Run manually:
   python srr.py --config ingest.yml
 """
+"""
+Service Routing Report Builder  (xlwings)
+==========================================
+Processes the raw Service Routing Report and produces a clean computed .xlsx,
+updates master Lib, recalculates, pastes into Combine, then pastes OCh Route
+into master CPQ_OCH.
+
+PIPELINE ORDER
+--------------
+1. Copy raw SRR -> output file, delete rows 1-3 from both sheets
+2. Set raw data cols as values, write coded formula cols, fill down
+3. Update master Lib col C/D with new NEs from Trail E2E col H+S
+4. Recalculate: open Combine first, then Master, then SRR output -> save
+5. Paste SRR Trail E2E (filtered CF==1) into Combine Sheet1 cols O-AB
+   Paste SRR OCh Route (filtered BM!=0) into Combine Sheet1 cols AD-AG
+   Save Combine
+6. Paste OCh Route A:BM (header + all data) as values -> master CPQ_OCH
+
+PASTE MAP TO COMBINE (Sheet1, data from row 3)
+----------------------------------------------
+Source: SRR Trail E2E, rows where CF (Filter SL Needed) == 1
+  CG -> O   (service name)
+  CH -> P   (signal name)
+  CI -> Q   (ASON)
+  CJ -> R   (route type)
+  CK -> S   (och name)
+  BL -> T   (Circuit Group)
+  BQ -> U   (ClientSrcID)
+  BR -> V   (ClientSnkID)
+  BS -> W   (OCHSrcID)
+  BT -> X   (OCHSnkID)
+  BZ -> Y   (W %)
+  CA -> Z   (WnR %)
+  CD -> AA  (#Sharing Ratio W %)
+  CE -> AB  (#Sharing Ratio WnR %)
+
+Source: SRR OCh Route, rows where BM (Filter) != 0
+  BI -> AD  (OCH Name)
+  BJ -> AE  (Signal Rate)
+  BK -> AF  (OCH Name2)
+  BL -> AG  (Circuit ID / OCH Name3)
+
+WEEKLY UPDATES IN CONFIG
+------------------------
+  Paths come from ingest.yml: week_label, pipeline.master_workbook,
+  pipeline.combine_workbook, and CPQ week inputs under output_base.
+
+USAGE
+-----
+    python try_srr2.py --config ingest.yml
+"""
 
 from __future__ import annotations
 
