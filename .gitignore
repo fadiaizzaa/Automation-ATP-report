@@ -1,0 +1,6 @@
+output/*
+raw files/*
+input/*
+.venv/*
+computed/*
+__pycache__/*

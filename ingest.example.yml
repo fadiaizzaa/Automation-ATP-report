@@ -1,0 +1,165 @@
+# Copy to ingest.yml and edit. Paths are relative to this file's folder unless absolute.
+# Path strings may use: {week_label}, {previous_week_label}, {week_number},
+# {previous_week_number}, {week_short}, {previous_week_short}.
+path: "C:\\Users\\fadia\\Downloads\\Huawei-Fadia Izza Nabila\\ATP NMS"
+week_label: "Week 19"
+previous_week_label: "Week 17"
+output_base: input
+
+inputs:
+  cpq_zip: "{path}/{week_label}/raw files//your_cpq_outer.zip"
+  current_performance_file: "{path}/{week_label}/raw files//your_performance.zip"
+  card_file: "{path}/{week_label}/raw files//your_card.zip"
+  oam_file: "{path}/{week_label}/raw files//your_oam.xlsx"
+  sfp_file: "{path}/{week_label}/raw files//your_sfp.xlsx"
+pipeline:
+  computed_dir: "{path}/output/{week_label}/computed"
+  # Faster SRR recalc. Set true if Excel links/formulas look stale.
+  full_excel_rebuild: false
+  # master / combine: relative to this YAML; bare combine filename is also tried in master's folder
+  master_workbook: "{path}/output/{week_label}/OTS ATP NMS {week_short}.xlsx"
+  combine_workbook: "{path}/output/{week_label}/Combine_6 May 2026.xlsx"
+  # Optional: explicit previous NRR instead of previous_week_label + output_base layout
+  previous_network_resource_workbook: "{path}/output/{previous_week_label}/computed/{previous_week_label}_Network Resource Statistics.xlsm"
+  # Optional SRR output filename (default: {week_label}_ServiceRouting_computed2.xlsx)
+  # service_routing_computed: "{week_label}_ServiceRouting_computed2.xlsx"
+
+# Sheet layouts: header_row = Excel row of titles; columns = stable_key: "Exact Excel header text"
+workbooks:
+  network_resource_statistics:
+    sheets:
+      Fiber:
+        header_row: 2
+        columns:
+          # row_no — not `no` (YAML 1.1 parses bare `no` as false)
+          row_no: "No."
+          phase: "Phase*"
+          resource_status: "Resource Status"
+          name_star: "Name*"
+          source_site: "Source Site*"
+          sink_site: "Sink Site*"
+          type_star: "Type*"
+          zero_dispersion_area: "Zero-Dispersion Area"
+          domain_star: "Domain*"
+          direction: "Direction"
+          distance_km: "Distance(km)*"
+          attenuation_db: "Attenuation(dB)*"
+          attenuation_coefficient: "Attenuation Coefficient(dB/km)*"
+          dispersion_ps_nm: "Dispersion(ps/nm)*"
+          dispersion_coefficient: "Dispersion Coefficient(ps/nm/km)*"
+          pmd: "PMD(ps/sqrt(km))*"
+          dgd: "DGD(ps)*"
+          margin_db: "Margin(dB)"
+          other_loss_db: "Other Loss (dB)"
+          user_cost: "User Cost"
+          remarks: "Remarks"
+          # Previous-week workbook must carry these titles on the same Fiber sheet:
+          prev_span_value: "FINALDWDMSpanValue"
+          prev_remark: "Remark"
+          prev_span_count: "Span Count"
+
+  fiber_computed:
+    sheets:
+      Fiber:
+        header_row: 2
+        columns:
+          name_star: "Name*"
+          finally_dwdm_span: "FINALDWDMSpanValue"
+
+  oms_trail_integrity:
+    sheets:
+      OMS Trails:
+        header_row: 1
+        columns: {}
+      OMS Routes:
+        header_row: 1
+        columns:
+          route_type: "Route Type"
+
+  oms_computed:
+    sheets:
+      OMS Trails:
+        header_row: 1
+        columns: {}
+      OMS Routes:
+        header_row: 1
+        columns:
+          oms_name: "OMS Name"
+          trail_name: "Trail Name"
+          span: "Span"
+
+  och_trail_integrity:
+    sheets:
+      OCh Trails:
+        header_row: 1
+        columns: {}
+      OCh Routes:
+        header_row: 1
+        columns: {}
+
+  och_computed:
+    sheets:
+      OCh Routes:
+        header_row: 1
+        columns:
+          # First four source columns by letter avoids duplicate header text:
+          route_col_1: "A"
+          route_col_2: "B"
+          route_col_3: "C"
+          route_col_4: "D"
+          oms_span: "OMS Span"
+      OMS Routes:
+        header_row: 1
+        columns:
+          oms_name: "OMS Name"
+          trail_name: "Trail Name"
+          span: "Span"
+
+  service_routing_report:
+    sheets:
+      "OCh Route":
+        header_row: 4
+        columns:
+          och_c: "Service Name"
+          och_e: "Signal Rate"
+          och_g: "Frequency"
+          och_h: "WaveLength Number"
+          och_m: "NE of Source Board"
+          och_o: "Subrack of Source Board index in ne"
+          och_p: "Subrack of Source Board"
+          och_q: "Slot of Source Board"
+          och_s: "Source Port"
+          och_ac: "NE of Sink Board"
+          och_ae: "Subrack of Sink Board index in ne"
+          och_af: "Subrack of Sink Board"
+          och_ag: "Slot of Sink Board"
+          och_ai: "Sink Port"
+          # Bare letters OK when duplicate titles appear on one header row:
+          lib_ne_column_h: "H"
+          lib_ne_column_s: "S"
+      "Trail E2E Route":
+        header_row: 4
+        columns:
+          e2e_c: "Service Name"
+          e2e_d: "Signal Name"
+          e2e_e: "ASON Type"
+          e2e_ad: "Route Type 1"
+          e2e_ae: "OCh Name"
+          e2e_h: "NE of Source Board"
+          e2e_j: "Subrack of Source Board"
+          e2e_m: "Slot of Source Board"
+          e2e_o: "Source Port"
+          e2e_s: "NE of Sink Board"
+          e2e_u: "Subrack of Sink Board"
+          e2e_x: "Slot of Sink Board"
+          e2e_z: "Sink Port"
+          e2e_ag: "OCh NE of Source Board"
+          e2e_aj: "OCh Subrack of Source Board"
+          e2e_al: "OCh Slot of Source Board"
+          e2e_ao: "OCh Source Port"
+          e2e_as: "OCh NE of Sink Board"
+          e2e_av: "OCh Subrack of Sink Board"
+          e2e_ax: "OCh Slot of Sink Board"
+          e2e_ba: "OCh Sink Port"
+          lib_ne_column_h: "H"
+          lib_ne_column_s: "S"
