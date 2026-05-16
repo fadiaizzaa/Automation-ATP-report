@@ -81,8 +81,10 @@ FILTER_OSC_PATTERNS = ["*ST*", "*SC*"]
 
 OCH_PERFORMANCE_SHEET = "OCH Performance"
 OAU_SHEET = "OAU"
+OSC_SHEET = "OSC"
 OCH_PASTE_START_ROW = 7
 OAU_PASTE_START_ROW = 6
+OSC_PASTE_START_ROW = 3
 PASTE_CHUNK_ROWS = 20_000
 
 OCH_PERFORMANCE_EVENTS = {
@@ -96,6 +98,7 @@ OCH_PERFORMANCE_EVENTS = {
     "DGDCUR",
 }
 OAU_PERFORMANCE_EVENTS = {"SUMIOPCUR", "SUMOOPCUR"}
+OSC_PERFORMANCE_EVENTS = {"LSOOPCUR(DBM)", "LSIOPCUR(DBM)"}
 
 
 def setup_logging() -> None:
@@ -127,6 +130,10 @@ def event_code(value: object) -> str:
     return text.split("(", 1)[0].strip()
 
 
+def event_text(value: object) -> str:
+    return str(value or "").strip().upper().replace(" ", "")
+
+
 def pattern_match(value: object, patterns: list[str]) -> bool:
     text = str(value or "").upper()
     return any(pattern.strip("*").upper() in text for pattern in patterns)
@@ -142,6 +149,12 @@ def is_oau_row(values: list[object]) -> bool:
     return pattern_match(values[0] if values else None, FILTER_AMP_PATTERNS) and event_code(
         values[1] if len(values) > 1 else None
     ) in OAU_PERFORMANCE_EVENTS
+
+
+def is_osc_row(values: list[object]) -> bool:
+    return pattern_match(values[0] if values else None, FILTER_OSC_PATTERNS) and event_text(
+        values[1] if len(values) > 1 else None
+    ) in OSC_PERFORMANCE_EVENTS
 
 
 def copy_cell_style(source, target) -> None:
@@ -197,12 +210,25 @@ def output_default(config_path: Path, week_label: str) -> Path:
     return config_path.parent / "outputs" / f"{week_label}_Current_Performance_Data_output.xlsx"
 
 
-def performance_paths(config_path: Path) -> tuple[dict, Path, Path]:
+def performance_paths(config_path: Path) -> tuple[dict, list[Path]]:
     cfg = load_yaml(config_path)
     paths = build_pipeline_paths(cfg, config_path)
     main = paths.nms_week_dir / f"{paths.week_label}_Current Performance Data.xlsx"
-    continuation = paths.nms_week_dir / f"{paths.week_label}_Current Performance Data_1.xlsx"
-    return cfg, main, continuation
+    if not main.is_file():
+        raise FileNotFoundError(f"Missing main Current Performance workbook: {main}")
+
+    pattern = f"{paths.week_label}_Current Performance Data_*.xlsx"
+    continuations: list[tuple[int, Path]] = []
+    for path in paths.nms_week_dir.glob(pattern):
+        match = re.fullmatch(
+            rf"{re.escape(paths.week_label)}_Current Performance Data_(\d+)\.xlsx",
+            path.name,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            continuations.append((int(match.group(1)), path))
+
+    return cfg, [main] + [path for _, path in sorted(continuations)]
 
 
 def optional_pipeline_path(cfg: dict, config_path: Path, key: str) -> Path | None:
@@ -246,35 +272,35 @@ def read_template_styles(template_path: Path):
 
 
 def build_output(
-    main_path: Path,
-    continuation_path: Path,
-    template_path: Path,
+    performance_files: list[Path],
+    template_path: Path | None,
     output_path: Path,
-) -> tuple[list[list[object]], list[list[object]]]:
-    for path, label in [
-        (main_path, "main Current Performance workbook"),
-        (continuation_path, "continuation Current Performance workbook"),
-        (template_path, "template workbook"),
-    ]:
+) -> tuple[list[list[object]], list[list[object]], list[list[object]]]:
+    if not performance_files:
+        raise ValueError("No Current Performance workbooks were provided")
+    for path in performance_files:
         if not path.is_file():
-            raise FileNotFoundError(f"Missing {label}: {path}")
+            raise FileNotFoundError(f"Missing Current Performance workbook: {path}")
+    style_source_path = template_path or performance_files[0]
+    if not style_source_path.is_file():
+        raise FileNotFoundError(f"Missing style source workbook: {style_source_path}")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    header_styles, data_styles, widths = read_template_styles(template_path)
+    header_styles, data_styles, widths = read_template_styles(style_source_path)
 
-    main_wb = load_workbook(main_path, read_only=True, data_only=False)
-    continuation_wb = load_workbook(continuation_path, read_only=True, data_only=False)
+    workbooks = [load_workbook(path, read_only=True, data_only=False) for path in performance_files]
     try:
-        main_ws = main_wb[SHEET1]
-        continuation_ws = continuation_wb[SHEET1]
+        worksheets = [wb[SHEET1] for wb in workbooks]
+        main_ws = worksheets[0]
         och_rows: list[list[object]] = []
         oau_rows: list[list[object]] = []
+        osc_rows: list[list[object]] = []
 
-        final_last_row = main_ws.max_row + max(0, continuation_ws.max_row - 1)
+        final_last_row = main_ws.max_row + sum(max(0, ws.max_row - 1) for ws in worksheets[1:])
         final_records = final_last_row - (FIRST_DATA_ROW - 1)
-        log.info("Main rows: %s", main_ws.max_row)
-        log.info("Continuation rows: %s", continuation_ws.max_row)
+        for path, ws in zip(performance_files, worksheets):
+            log.info("%s rows: %s", path.name, ws.max_row)
         log.info("Final rows: %s", final_last_row)
         log.info("Final records: %s", final_records)
 
@@ -298,23 +324,28 @@ def build_output(
                     och_rows.append(raw_values)
                 if is_oau_row(raw_values):
                     oau_rows.append(raw_values)
+                if is_osc_row(raw_values):
+                    osc_rows.append(first_n(raw_values, 7))
 
             styles = header_styles.get(row_idx, data_styles)
             out_ws.append(styled_row(out_ws, values, styles))
 
         next_output_row = main_ws.max_row + 1
-        for source_row_idx, row in enumerate(continuation_ws.iter_rows(values_only=True), start=1):
-            if source_row_idx < CONTINUATION_FIRST_DATA_ROW:
-                continue
-            values = first_n(row, RAW_COLS)
-            text_values = row_as_master_text(values)
-            if is_och_performance_row(text_values):
-                och_rows.append(text_values)
-            if is_oau_row(text_values):
-                oau_rows.append(text_values)
-            values.extend(filter_formulas(next_output_row))
-            out_ws.append(styled_row(out_ws, values, data_styles))
-            next_output_row += 1
+        for continuation_ws in worksheets[1:]:
+            for source_row_idx, row in enumerate(continuation_ws.iter_rows(values_only=True), start=1):
+                if source_row_idx < CONTINUATION_FIRST_DATA_ROW:
+                    continue
+                values = first_n(row, RAW_COLS)
+                text_values = row_as_master_text(values)
+                if is_och_performance_row(text_values):
+                    och_rows.append(text_values)
+                if is_oau_row(text_values):
+                    oau_rows.append(text_values)
+                if is_osc_row(text_values):
+                    osc_rows.append(first_n(text_values, 7))
+                values.extend(filter_formulas(next_output_row))
+                out_ws.append(styled_row(out_ws, values, data_styles))
+                next_output_row += 1
 
         out_wb.create_sheet(SHEET2)
         out_wb.create_sheet(SHEET3)
@@ -322,23 +353,24 @@ def build_output(
         log.info("Saved -> %s", output_path)
         log.info("OCH Performance filtered rows: %s", len(och_rows))
         log.info("OAU filtered rows: %s", len(oau_rows))
-        return och_rows, oau_rows
+        log.info("OSC filtered rows: %s", len(osc_rows))
+        return och_rows, oau_rows, osc_rows
     finally:
-        main_wb.close()
-        continuation_wb.close()
+        for wb in workbooks:
+            wb.close()
 
 
-def collect_filtered_rows(main_path: Path, continuation_path: Path) -> tuple[list[list[object]], list[list[object]]]:
+def collect_filtered_rows(performance_files: list[Path]) -> tuple[list[list[object]], list[list[object]], list[list[object]]]:
     """Fast path: read raw A:H rows and collect only rows needed by the master."""
-    for path, label in [
-        (main_path, "main Current Performance workbook"),
-        (continuation_path, "continuation Current Performance workbook"),
-    ]:
+    if not performance_files:
+        raise ValueError("No Current Performance workbooks were provided")
+    for path in performance_files:
         if not path.is_file():
-            raise FileNotFoundError(f"Missing {label}: {path}")
+            raise FileNotFoundError(f"Missing Current Performance workbook: {path}")
 
     och_rows: list[list[object]] = []
     oau_rows: list[list[object]] = []
+    osc_rows: list[list[object]] = []
 
     def scan_sheet(workbook_path: Path, first_data_row: int) -> None:
         log.info("Scanning %s from row %s ...", workbook_path.name, first_data_row)
@@ -358,25 +390,29 @@ def collect_filtered_rows(main_path: Path, continuation_path: Path) -> tuple[lis
                     och_rows.append(values)
                 if is_oau_row(values):
                     oau_rows.append(values)
+                if is_osc_row(values):
+                    osc_rows.append(first_n(values, 7))
             log.info("  Scanned %s rows", scanned)
         finally:
             wb.close()
 
-    scan_sheet(main_path, FIRST_DATA_ROW)
-    scan_sheet(continuation_path, CONTINUATION_FIRST_DATA_ROW)
+    for idx, path in enumerate(performance_files):
+        first_data_row = FIRST_DATA_ROW if idx == 0 else CONTINUATION_FIRST_DATA_ROW
+        scan_sheet(path, first_data_row)
 
     log.info("OCH Performance filtered rows: %s", len(och_rows))
     log.info("OAU filtered rows: %s", len(oau_rows))
-    return och_rows, oau_rows
+    log.info("OSC filtered rows: %s", len(osc_rows))
+    return och_rows, oau_rows, osc_rows
 
 
-def paste_rows(sheet: xw.Sheet, start_cell: str, rows: list[list[object]]) -> None:
+def paste_rows(sheet: xw.Sheet, start_cell: str, rows: list[list[object]], width: int = RAW_COLS) -> None:
     if not rows:
         return
     start = sheet.range(start_cell)
     for offset in range(0, len(rows), PASTE_CHUNK_ROWS):
         chunk = rows[offset : offset + PASTE_CHUNK_ROWS]
-        target = sheet.range((start.row + offset, start.column)).resize(len(chunk), RAW_COLS)
+        target = sheet.range((start.row + offset, start.column)).resize(len(chunk), width)
         target.number_format = "@"
         target.value = chunk
 
@@ -416,29 +452,75 @@ def update_master_performance(master_path: Path, och_rows: list[list[object]], o
         app.quit()
 
 
+def optional_omsp_path(cfg: dict, config_path: Path) -> Path | None:
+    return optional_pipeline_path(cfg, config_path, "dwdm_omsp_output")
+
+
+def update_omsp_osc_performance(omsp_path: Path | None, osc_rows: list[list[object]]) -> None:
+    if omsp_path is None:
+        log.info("Skipping OMSP OSC paste; pipeline.dwdm_omsp_output is not configured.")
+        return
+    if not omsp_path.is_file():
+        raise FileNotFoundError(f"Missing OMSP/DWDM workbook: {omsp_path}")
+
+    log.info("Updating OMSP OSC sheet: %s", omsp_path)
+    app = xw.App(visible=False, add_book=False)
+    app.display_alerts = False
+    app.screen_updating = False
+    wb = None
+    try:
+        wb = app.books.open(str(omsp_path), update_links=False)
+        ws = wb.sheets[OSC_SHEET]
+        used_last = max(ws.used_range.last_cell.row, OSC_PASTE_START_ROW)
+        ws.range(f"C{OSC_PASTE_START_ROW}:I{used_last}").clear_contents()
+        if used_last > OSC_PASTE_START_ROW:
+            ws.range(f"J{OSC_PASTE_START_ROW + 1}:Q{used_last}").clear_contents()
+        paste_rows(ws, f"C{OSC_PASTE_START_ROW}", osc_rows, width=7)
+        if len(osc_rows) > 1:
+            last_row = OSC_PASTE_START_ROW + len(osc_rows) - 1
+            formula_source = ws.range(f"J{OSC_PASTE_START_ROW}:Q{OSC_PASTE_START_ROW}")
+            formula_target = ws.range(f"J{OSC_PASTE_START_ROW}:Q{last_row}")
+            formula_source.api.AutoFill(formula_target.api)
+        app.calculate()
+        wb.save()
+        log.info("  Pasted %s rows -> %s C:I", len(osc_rows), OSC_SHEET)
+    finally:
+        if wb is not None:
+            try:
+                wb.close()
+            except Exception:
+                pass
+        app.screen_updating = True
+        app.quit()
+
+
 def run_fast_master_paste(config_path: Path) -> int:
-    cfg, main_path, continuation_path = performance_paths(config_path)
+    cfg, performance_files = performance_paths(config_path)
     paths = build_pipeline_paths(cfg, config_path)
     pipe = cfg.get("pipeline") if isinstance(cfg.get("pipeline"), dict) else {}
 
     log.info("Fast mode: filtering raw Current Performance files directly.")
-    och_rows, oau_rows = collect_filtered_rows(main_path, continuation_path)
+    och_rows, oau_rows, osc_rows = collect_filtered_rows(performance_files)
 
     if pipe.get("make_master_backup", True):
-        backup = backup_path_for(paths.master_workbook, "_PERFORMANCE_BACKUP")
+        backup = backup_path_for(paths.master_workbook, "_BACKUP")
         shutil.copy2(paths.master_workbook, backup)
         log.info("Master backup -> %s", backup.name)
 
     update_master_performance(paths.master_workbook, och_rows, oau_rows)
+    update_omsp_osc_performance(optional_omsp_path(cfg, config_path), osc_rows)
     return 0
 
 
-def verify_output(output_path: Path, main_path: Path, continuation_path: Path) -> None:
-    main_wb = load_workbook(main_path, read_only=True, data_only=False)
-    continuation_wb = load_workbook(continuation_path, read_only=True, data_only=False)
+def verify_output(output_path: Path, performance_files: list[Path]) -> None:
+    if not performance_files:
+        raise ValueError("No Current Performance workbooks were provided")
+    workbooks = [load_workbook(path, read_only=True, data_only=False) for path in performance_files]
     out_wb = load_workbook(output_path, read_only=True, data_only=False)
     try:
-        expected_rows = main_wb[SHEET1].max_row + continuation_wb[SHEET1].max_row - 1
+        worksheets = [wb[SHEET1] for wb in workbooks]
+        main_ws = worksheets[0]
+        expected_rows = main_ws.max_row + sum(max(0, ws.max_row - 1) for ws in worksheets[1:])
         ws = out_wb[SHEET1]
         if out_wb.sheetnames[:3] != [SHEET1, SHEET2, SHEET3]:
             raise AssertionError(f"Unexpected sheets: {out_wb.sheetnames}")
@@ -470,23 +552,24 @@ def verify_output(output_path: Path, main_path: Path, continuation_path: Path) -
                 raise AssertionError(
                     f"Missing formulas in I:K row {row_idx}: {[formula_i] + formulas_jk}"
                 )
-        continuation_first = [
-            continuation_wb[SHEET1].cell(CONTINUATION_FIRST_DATA_ROW, c).value
-            for c in range(1, RAW_COLS + 1)
-        ]
-        pasted_first = [ws.cell(main_wb[SHEET1].max_row + 1, c).value for c in range(1, RAW_COLS + 1)]
-        if pasted_first != continuation_first:
-            raise AssertionError("Continuation first data row was not pasted at the expected output row")
+        if len(worksheets) > 1:
+            continuation_first = [
+                worksheets[1].cell(CONTINUATION_FIRST_DATA_ROW, c).value
+                for c in range(1, RAW_COLS + 1)
+            ]
+            pasted_first = [ws.cell(main_ws.max_row + 1, c).value for c in range(1, RAW_COLS + 1)]
+            if pasted_first != continuation_first:
+                raise AssertionError("Continuation first data row was not pasted at the expected output row")
         total_cell = ws.cell(6, 1).value
         expected_total = total_records_text(actual_rows - (FIRST_DATA_ROW - 1))
         if total_cell != expected_total:
             raise AssertionError(f"Expected row 6 total {expected_total!r}, got {total_cell!r}")
-        if re.match(r"Monitored Object", str(ws.cell(main_wb[SHEET1].max_row + 1, 1).value or "")):
+        if len(worksheets) > 1 and re.match(r"Monitored Object", str(ws.cell(main_ws.max_row + 1, 1).value or "")):
             raise AssertionError("Continuation header row appears to have been duplicated")
         log.info("Verification OK.")
     finally:
-        main_wb.close()
-        continuation_wb.close()
+        for wb in workbooks:
+            wb.close()
         out_wb.close()
 
 
@@ -504,7 +587,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
-        cfg, main_path, continuation_path = performance_paths(config_path)
+        cfg, performance_files = performance_paths(config_path)
         paths = build_pipeline_paths(cfg, config_path)
         week_label = str(cfg["week_label"]).strip()
         template_path = (
@@ -513,25 +596,31 @@ def main(argv: list[str] | None = None) -> int:
             else optional_pipeline_path(cfg, config_path, "current_performance_template")
         )
         if template_path is None:
-            log.error("Set --template or pipeline.current_performance_template in ingest.yml")
-            return 1
+            log.info("No Current Performance template configured; using the main workbook for styles.")
         output_path = (
             args.output.resolve()
             if args.output
             else optional_pipeline_path(cfg, config_path, "current_performance_output")
             or output_default(config_path, week_label).resolve()
         )
-        if output_path in {main_path.resolve(), continuation_path.resolve(), template_path.resolve()}:
+        input_paths = {path.resolve() for path in performance_files}
+        protected_paths = input_paths | ({template_path.resolve()} if template_path else set())
+        if output_path.resolve() in protected_paths:
             log.error("Refusing to overwrite input/template workbook: %s", output_path)
             return 1
-        och_rows, oau_rows = build_output(main_path, continuation_path, template_path.resolve(), output_path)
-        verify_output(output_path, main_path, continuation_path)
+        och_rows, oau_rows, osc_rows = build_output(
+            performance_files,
+            template_path.resolve() if template_path else None,
+            output_path,
+        )
+        verify_output(output_path, performance_files)
         pipe = cfg.get("pipeline") if isinstance(cfg.get("pipeline"), dict) else {}
         if pipe.get("make_master_backup", True):
             backup = backup_path_for(paths.master_workbook, "_BACKUP")
             shutil.copy2(paths.master_workbook, backup)
             log.info("Master backup -> %s", backup.name)
         update_master_performance(paths.master_workbook, och_rows, oau_rows)
+        update_omsp_osc_performance(optional_omsp_path(cfg, config_path), osc_rows)
         return 0
     except Exception:
         log.exception("build_current_performance_output failed")

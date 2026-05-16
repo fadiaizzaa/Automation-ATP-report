@@ -3,7 +3,7 @@
 Current Performance Data helper.
 
 This is the short/manual entrypoint for the full Current Performance process:
-  1. read the capped main Current Performance workbook and the _1 continuation
+  1. read the capped main Current Performance workbook and any numbered continuations
   2. filter the rows directly in Python
   3. paste filtered Line Board rows into master sheet "OCH Performance"
   4. paste filtered Amplifier Board rows into master sheet "OAU"
@@ -13,7 +13,7 @@ Use --build-output only when you also want the huge merged formula workbook.
 Paths are read from ingest.yml:
   - prepared NMS files come from output_base/week_label/NMS
   - master workbook comes from pipeline.master_workbook
-  - template comes from pipeline.current_performance_template
+  - template can come from pipeline.current_performance_template
   - output comes from pipeline.current_performance_output
 
 Usage:

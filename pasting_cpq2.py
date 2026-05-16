@@ -12,7 +12,7 @@ columns when present.
 
 USAGE
 -----
-  python try_pasting_cpq2.py --config ingest.yml
+  python pasting_cpq2.py --config ingest.yml
 
 REQUIREMENTS
 ------------
@@ -28,9 +28,9 @@ import shutil
 import sys
 from pathlib import Path
 
-import xlwings as xw
-from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter, column_index_from_string
+import xlwings as xw # type: ignore
+from openpyxl import load_workbook # type: ignore
+from openpyxl.utils import get_column_letter, column_index_from_string # type: ignore
 
 from pipeline_config import (
     WB_OCH_COMPUTED,
@@ -455,7 +455,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return run(cfg_path)
     except Exception:
-        log.exception("try_pasting_cpq2 failed")
+        log.exception("pasting_cpq2 failed")
         return 1
 
 

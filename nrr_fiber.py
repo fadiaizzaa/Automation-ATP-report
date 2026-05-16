@@ -5,7 +5,7 @@ Paths and column titles come from ingest YAML (--config).
 
 USAGE
 -----
-    python try_nrr_fiber.py --config ingest.yml
+    python nrr_fiber.py --config ingest.yml
 
 REQUIREMENTS
 ------------

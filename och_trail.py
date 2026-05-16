@@ -5,7 +5,7 @@ Uses ingest.yml (--config).
 
 USAGE
 -----
-    python try_och_trail.py --config ingest.yml
+    python och_trail.py --config ingest.yml
 
 REQUIREMENTS
 ------------

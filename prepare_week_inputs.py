@@ -5,8 +5,8 @@ Prepare normalized week input workbooks from raw exports (ZIP / XLSX).
 Reads a YAML config (paths relative to the config file directory), extracts
 nested CPQ / NMS archives, and writes files under:
 
-  {output_base}/{week_label}/CPQ/
-  {output_base}/{week_label}/NMS/
+  {output_base}/input/CPQ/  (or {output_base}/CPQ/ if output_base already ends with input)
+  {output_base}/input/NMS/  (or {output_base}/NMS/ if output_base already ends with input)
 
 Requirements:
   pip install pyyaml
@@ -31,7 +31,7 @@ from typing import Any
 
 import yaml
 
-from pipeline_config import expand_config_value
+from pipeline_config import configured_output_base, expand_config_value, prepared_input_root
 
 _EXCEL_SUFFIXES = (".xlsx", ".xlsm", ".xls")
 
@@ -55,6 +55,9 @@ REQUIRED_INPUT_KEYS = (
     "card_file",
     "oam_file",
     "sfp_file",
+)
+OPTIONAL_INPUT_KEYS = (
+    "fiber_table_file",
 )
 
 
@@ -207,6 +210,7 @@ def expected_week_workbooks(week_label: str, cpq_dir: Path, nms_dir: Path) -> li
             nms_dir / f"{week_label}_Card Report.xlsx",
             nms_dir / f"{week_label}_Optical_Attenuation.xlsx",
             nms_dir / f"{week_label}_SFP.xlsx",
+            nms_dir / f"{week_label}_Fiber Table Data.xlsx",
         ]
     )
     return out
@@ -397,6 +401,23 @@ def process_card_zip(
         copy_or_dry(src, dest_dir / f"{week_label}_Card Report.xlsx", dry_run)
 
 
+def process_fiber_table_zip(
+    zip_path: Path,
+    dest_dir: Path,
+    week_label: str,
+    dry_run: bool,
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="fiber_table_") as tmp:
+        root = Path(tmp)
+        safe_extract_zip(zip_path, root)
+        xs = [p for p in list_workbooks(root, (".xlsx",)) if not p.name.startswith("~$")]
+        if not xs:
+            raise RuntimeError("Fiber Table Data ZIP: no .xlsx found")
+        for idx, src in enumerate(xs):
+            suffix = "" if idx == 0 else f"_{idx}"
+            copy_or_dry(src, dest_dir / f"{week_label}_Fiber Table Data{suffix}.xlsx", dry_run)
+
+
 def process_flat_xlsx(
     src: Path,
     dest_dir: Path,
@@ -439,12 +460,8 @@ def main(argv: list[str] | None = None) -> int:
         log.error("Config must set non-empty string 'week_label'")
         return 1
 
-    out_base = data.get("output_base", "input")
-    if not isinstance(out_base, str):
-        log.error("'output_base' must be a string")
-        return 1
     try:
-        out_root = resolve_input_path(config_dir, expand_config_value(out_base, data))
+        out_root = configured_output_base(data, config_dir)
     except ValueError as e:
         log.error("%s", e)
         return 1
@@ -460,7 +477,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     paths: dict[str, Path] = {}
-    for key in REQUIRED_INPUT_KEYS:
+    for key in REQUIRED_INPUT_KEYS + OPTIONAL_INPUT_KEYS:
+        if key in OPTIONAL_INPUT_KEYS and key not in inputs_block:
+            continue
         val = inputs_block[key]
         if not isinstance(val, str) or not val.strip():
             log.error("inputs.%s must be a non-empty string path", key)
@@ -474,8 +493,9 @@ def main(argv: list[str] | None = None) -> int:
             log.error("inputs.%s: %s", key, e)
             return 1
 
-    cpq_out = out_root / week_label / "CPQ"
-    nms_out = out_root / week_label / "NMS"
+    prepared_root = prepared_input_root(out_root)
+    cpq_out = prepared_root / "CPQ"
+    nms_out = prepared_root / "NMS"
 
     try:
         ensure_exists(paths["cpq_zip"], "cpq_zip")
@@ -483,9 +503,11 @@ def main(argv: list[str] | None = None) -> int:
         ensure_exists(paths["card_file"], "card_file")
         ensure_exists(paths["oam_file"], "oam_file")
         ensure_exists(paths["sfp_file"], "sfp_file")
+        if "fiber_table_file" in paths:
+            ensure_exists(paths["fiber_table_file"], "fiber_table_file")
 
         log.info("Week: %s", week_label)
-        log.info("Output root: %s", out_root)
+        log.info("Output root: %s", prepared_root)
         if args.dry_run:
             log.info("DRY-RUN mode (no files written)")
 
@@ -506,6 +528,13 @@ def main(argv: list[str] | None = None) -> int:
             f"{week_label}_SFP.xlsx",
             args.dry_run,
         )
+        if "fiber_table_file" in paths:
+            process_fiber_table_zip(
+                paths["fiber_table_file"],
+                nms_out,
+                week_label,
+                args.dry_run,
+            )
 
         if not args.dry_run and not args.skip_excel_recalc:
             force_recalculate_workbooks(

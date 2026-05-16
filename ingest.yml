@@ -4,28 +4,31 @@
 path: "C:\\Users\\fadia\\Downloads\\Huawei-Fadia Izza Nabila\\ATP NMS"
 week_label: "Week 19"
 previous_week_label: "Week 17"
-output_base: "{path}/input"
+output_base: "{path}/{week_label}"
 
 inputs:
-  cpq_zip: "{path}/input/{week_label}/raw files/20260505_1_20260506152923.zip"
-  current_performance_file: "{path}/input/{week_label}/raw files/Current_Performance_Data_2026-05-12_17-41-06.zip"
-  card_file: "{path}/input/{week_label}/raw files/Card_2026-05-05_09-55-38.zip"
-  oam_file: "{path}/input/{week_label}/raw files/Optical Attenuation Management_2026-05-05_10-00-45.xlsx"
-  sfp_file: "{path}/input/{week_label}/raw files/SFP_Information_Report.xlsx"
+  cpq_zip: "{output_base}/input/raw files/20260505_1_20260506152923.zip"
+  current_performance_file: "{output_base}/input/raw files/Current_Performance_Data_2026-05-12_17-41-06.zip"
+  card_file: "{output_base}/input/raw files/Card_2026-05-05_09-55-38.zip"
+  fiber_table_file: "{output_base}/input/raw files/report+Fiber+Table+Data_2026-04-30_09-33-56.zip"
+  oam_file: "{output_base}/input/raw files/Optical Attenuation Management_2026-05-05_10-00-45.xlsx"
+  sfp_file: "{output_base}/input/raw files/SFP_Information_Report.xlsx"
 
 pipeline:
-  computed_dir: "{path}/output/{week_label}/computed"
+  computed_dir: "{output_base}/computed"
   full_excel_rebuild: false
   # master / combine: relative to this YAML; bare combine filename is also tried in master's folder
-  master_workbook: "{path}/output/{week_label}/OTS ATP NMS {week_short}.xlsx"
-  combine_workbook: "{path}/output/{week_label}/Combine_6 May 2026.xlsx"
-  current_performance_template: "C:\\Users\\fadia\\Downloads\\Week 19_Current_Performance_Data_2026-05-07_16-34-38.xlsx"
-  current_performance_output: "{path}/output/{week_label}/{week_label}_Current_Performance_Data_output.xlsx"
+  master_workbook: "{output_base}/OTS ATP NMS {week_short}.xlsx"
+  combine_workbook: "{output_base}/Combine_6 May 2026.xlsx"
+  all_fiber_output: "{output_base}/{week_label}_All Fiber.xlsx"
+  dwdm_omsp_output: "{output_base}/{week_label}_OMSP_DWDMEvaluation.xlsx"
+  #current_performance_template: "C:\\Users\\fadia\\Downloads\\Week 19_Current_Performance_Data_2026-05-07_16-34-38.xlsx"
+  current_performance_output: "{output_base}/output/{week_label}_Current_Performance_Data_output.xlsx"
+  card_report_computed: "{output_base}/computed/{week_label}_Card_Report_computed.xlsx"
   # Optional: explicit previous NRR instead of previous_week_label + output_base layout
-  previous_network_resource_workbook: "{path}/input/{previous_week_label}/{previous_week_label}_Network Resource Statistics.xlsm"
+  previous_network_resource_workbook: "{path}/{previous_week_label}/{previous_week_label}_Network Resource Statistics.xlsm"
   # Optional SRR output filename (default: {week_label}_ServiceRouting_computed2.xlsx)
   # service_routing_computed: "{week_label}_ServiceRouting_computed2.xlsx"
-
 
 workbooks:
 

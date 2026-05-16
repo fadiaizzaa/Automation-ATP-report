@@ -5,7 +5,7 @@ Scans OMS_T col L + col R for NE names missing from Lib col N/O/P,
 then appends the missing rows. Uses xlwings so slicers, pivots, and
 conditional formatting in the master workbook are fully preserved.
 
-Run after ``try_pasting_cpq2`` / ``prepare_week_inputs`` has pasted fresh OMS Trails into OMS_T.
+Run after ``pasting_cpq2`` / ``prepare_week_inputs`` has pasted fresh OMS Trails into OMS_T.
 
 NE Name format: "{NE_ID}_{prefix}_{SiteName}"
   e.g. "6760_DBALo_Amplapura" -> NE ID=6760, Site="Amplapura"
@@ -16,7 +16,7 @@ to force-recalculate OMS_T col B (OMS_Name).
 CONFIG / USAGE
 --------------
 All paths come from ingest.yml (same ``pipeline.master_workbook`` resolution as
-``try_pasting_cpq2``). Run::
+``pasting_cpq2``). Run::
 
     python lib_updater.py --config ingest.yml
 

@@ -5,7 +5,7 @@ Uses ingest.yml (--config) for paths, header rows, and column titles.
 
 USAGE
 -----
-    python try_oms_trail.py --config ingest.yml
+    python oms_trail.py --config ingest.yml
 
 REQUIREMENTS
 ------------

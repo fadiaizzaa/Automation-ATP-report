@@ -1,19 +1,4 @@
 """
-Experimental canonical Service Routing Report builder.
-
-This implements the safer flow:
-  raw SRR -> validate/find configured headers -> clean internal layout -> formulas
-
-If Huawei inserts or moves a raw column, this script finds the configured header
-from ingest.yml and writes it into the stable internal column that formulas use.
-
-It intentionally writes to a separate computed workbook:
-  {week_label}_ServiceRouting_canonical.xlsx
-
-Run manually:
-  python srr.py --config ingest.yml
-"""
-"""
 Service Routing Report Builder  (xlwings)
 ==========================================
 Processes the raw Service Routing Report and produces a clean computed .xlsx,
@@ -62,7 +47,7 @@ WEEKLY UPDATES IN CONFIG
 
 USAGE
 -----
-    python try_srr2.py --config ingest.yml
+    python srr.py --config ingest.yml
 """
 
 from __future__ import annotations
@@ -75,7 +60,7 @@ from pathlib import Path
 from typing import Any
 
 import try_srr2 as base
-from openpyxl.utils import column_index_from_string
+from openpyxl.utils import column_index_from_string # type: ignore
 from pipeline_config import (
     WB_SERVICE_ROUTING,
     build_pipeline_paths,
@@ -303,7 +288,7 @@ def run(config_path: Path) -> int:
     make_master_backup = pipe.get("make_master_backup", True)
     full_excel_rebuild = base.config_bool(pipe.get("full_excel_rebuild"), False)
     if make_master_backup:
-        backup = master.with_stem(master.stem + "_SRR_CANONICAL_BACKUP")
+        backup = master.with_stem(master.stem + "_BACKUP")
         shutil.copy2(master, backup)
         log.info("Master backup -> %s", backup.name)
 

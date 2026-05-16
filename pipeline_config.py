@@ -5,7 +5,7 @@ Most paths resolve relative to the YAML directory.
 
 ``pipeline.master_workbook`` and ``pipeline.combine_workbook`` resolve relative to
 the config directory first. Combine also checks the master's folder for a basename
-match. Lastly the filename is sought under ``{output_base}/{week_label}/``.
+match. Lastly the filename is sought under ``{output_base}/``.
 """
 
 from __future__ import annotations
@@ -67,9 +67,11 @@ def _label_number(label: str) -> str:
     return match.group(1)
 
 
-def config_placeholders(cfg: dict[str, Any]) -> dict[str, str]:
-    """Return supported placeholders for reusable path strings in ingest YAML."""
-    week_label = cfg.get("week_label")
+def _config_placeholder_values(
+    cfg: dict[str, Any],
+    week_label_override: str | None = None,
+) -> dict[str, str]:
+    week_label = week_label_override if week_label_override is not None else cfg.get("week_label")
     if not isinstance(week_label, str) or not week_label.strip():
         raise ValueError("week_label must be a non-empty string")
     week_label = week_label.strip()
@@ -82,7 +84,7 @@ def config_placeholders(cfg: dict[str, Any]) -> dict[str, str]:
     }
 
     for key, value in cfg.items():
-        if key in values or key in {"inputs", "paths", "pipeline", "workbooks"}:
+        if key in values or key in {"inputs", "output_base", "paths", "pipeline", "workbooks"}:
             continue
         if isinstance(value, (str, int, float)):
             values[key] = str(value).strip()
@@ -110,6 +112,18 @@ def config_placeholders(cfg: dict[str, Any]) -> dict[str, str]:
     return values
 
 
+def config_placeholders(
+    cfg: dict[str, Any],
+    week_label_override: str | None = None,
+) -> dict[str, str]:
+    """Return supported placeholders for reusable path strings in ingest YAML."""
+    values = _config_placeholder_values(cfg, week_label_override)
+    output_base = cfg.get("output_base")
+    if isinstance(output_base, str) and output_base.strip():
+        values["output_base"] = output_base.strip().format(**values)
+    return values
+
+
 def expand_config_value(raw: str, cfg: dict[str, Any]) -> str:
     """Expand placeholders like ``{week_label}`` in a config string."""
     try:
@@ -117,6 +131,22 @@ def expand_config_value(raw: str, cfg: dict[str, Any]) -> str:
     except KeyError as e:
         key = e.args[0]
         raise ValueError(f"Unknown placeholder {{{key}}} in config value {raw!r}") from e
+
+
+def expand_config_value_for_week(raw: str, cfg: dict[str, Any], week_label: str) -> str:
+    """Expand a config string as if the current week were ``week_label``."""
+    try:
+        return raw.format(**config_placeholders(cfg, week_label_override=week_label))
+    except KeyError as e:
+        key = e.args[0]
+        raise ValueError(f"Unknown placeholder {{{key}}} in config value {raw!r}") from e
+
+
+def configured_output_base(cfg: dict[str, Any], config_dir: Path) -> Path:
+    out_base_s = cfg.get("output_base", "input")
+    if not isinstance(out_base_s, str):
+        raise ValueError("output_base must be a string")
+    return resolve_under(config_dir, expand_config_value(out_base_s, cfg))
 
 
 def resolve_under(config_dir: Path, raw: str) -> Path:
@@ -236,7 +266,7 @@ def try_resolve_workbook_path(
     1. Path relative to the ingest YAML directory (or absolute).
     2. If missing and ``extra_search_roots`` is given, try ``{root}/{basename}`` for each root
        (used so a bare combine filename resolves next to master when master lives elsewhere).
-    3. Else ``{output_base}/{week_label}/{basename}``.
+    3. Else ``{output_base}/{basename}``.
     """
     primary = resolve_under(cfg_dir, configured)
     name = Path(configured).name
@@ -246,10 +276,40 @@ def try_resolve_workbook_path(
         alt = (root.resolve() / name).resolve()
         if alt.is_file():
             return alt
-    under_week = (output_base / week_label.strip() / name).resolve()
-    if under_week.is_file():
-        return under_week
+    under_output_base = (output_base / name).resolve()
+    if under_output_base.is_file():
+        return under_output_base
     return primary.resolve()
+
+
+def resolve_pipeline_output_path(
+    cfg_dir: Path,
+    computed_dir: Path,
+    cfg: dict[str, Any],
+    raw: str | None,
+    default_name: str,
+) -> Path:
+    if isinstance(raw, str) and raw.strip():
+        expanded = expand_config_value(raw.strip(), cfg)
+        configured_path = Path(expanded)
+        if configured_path.name == expanded and not configured_path.is_absolute():
+            return computed_dir / expanded
+        return resolve_under(cfg_dir, expanded)
+    return computed_dir / default_name
+
+
+def previous_output_base(output_base: Path, week_label: str, previous_week_label: str) -> Path:
+    parts = output_base.parts
+    for idx, part in enumerate(parts):
+        if part.lower() == week_label.lower():
+            return Path(*parts[:idx], previous_week_label, *parts[idx + 1 :])
+    return output_base / previous_week_label
+
+
+def prepared_input_root(output_base: Path) -> Path:
+    if output_base.name.lower() == "input":
+        return output_base
+    return output_base / "input"
 
 
 def build_pipeline_paths(cfg: dict[str, Any], config_path: Path) -> PipelinePaths:
@@ -258,11 +318,8 @@ def build_pipeline_paths(cfg: dict[str, Any], config_path: Path) -> PipelinePath
     if not isinstance(week_label, str) or not week_label.strip():
         raise ValueError("week_label must be a non-empty string")
 
-    out_base_s = cfg.get("output_base", "input")
-    if not isinstance(out_base_s, str):
-        raise ValueError("output_base must be a string")
-    out_base_s = expand_config_value(out_base_s, cfg)
-    output_base = resolve_under(cfg_dir, out_base_s)
+    output_base = configured_output_base(cfg, cfg_dir)
+    input_root = prepared_input_root(output_base)
 
     pipe = cfg.get("pipeline")
     if not isinstance(pipe, dict):
@@ -281,8 +338,8 @@ def build_pipeline_paths(cfg: dict[str, Any], config_path: Path) -> PipelinePath
     master_s = expand_config_value(master_s, cfg)
     combine_s = expand_config_value(combine_s, cfg)
 
-    cpq_week = output_base / week_label / "CPQ"
-    nms_week = output_base / week_label / "NMS"
+    cpq_week = input_root / "CPQ"
+    nms_week = input_root / "NMS"
 
     cur_nrr = try_resolve_nms_workbook(cpq_week, week_label, "Network Resource Statistics")
     if cur_nrr is None:
@@ -295,17 +352,22 @@ def build_pipeline_paths(cfg: dict[str, Any], config_path: Path) -> PipelinePath
     else:
         prev_label = cfg.get("previous_week_label")
         if isinstance(prev_label, str) and prev_label.strip():
-            prev_cpq = output_base / prev_label.strip() / "CPQ"
+            prev_cpq = prepared_input_root(
+                previous_output_base(output_base, week_label, prev_label.strip())
+            ) / "CPQ"
             prev_path = try_resolve_nms_workbook(prev_cpq, prev_label.strip(), "Network Resource Statistics")
 
     if prev_path is None:
         raise ValueError("Set previous_week_label or pipeline.previous_network_resource_workbook")
 
     svc_out_name = pipe.get("service_routing_computed")
-    if isinstance(svc_out_name, str) and svc_out_name.strip():
-        svc_out = computed_dir / expand_config_value(svc_out_name.strip(), cfg)
-    else:
-        svc_out = computed_dir / f"{week_label}_ServiceRouting_computed2.xlsx"
+    svc_out = resolve_pipeline_output_path(
+        cfg_dir,
+        computed_dir,
+        cfg,
+        svc_out_name,
+        f"{week_label}_ServiceRouting_computed2.xlsx",
+    )
 
     oms_src = cpq_week / f"{week_label}_OMS Trail Integrity.xlsx"
     och_src = cpq_week / f"{week_label}_OCh Trail Integrity.xlsx"
