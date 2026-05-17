@@ -42,6 +42,7 @@ STEPS: list[tuple[str, Path]] = [
     ("srr", CPQ_DIR / "srr.py"),
     ("update_all_fiber", CPQ_DIR / "update_all_fiber.py"),
     ("pasting_nms", PIPELINE_DIR / "pasting_nms.py"),
+    ("cur_performance", PIPELINE_DIR / "cur_performance.py"),
 ]
 
 
@@ -133,6 +134,8 @@ def main(argv: list[str] | None = None) -> int:
             log.error("Missing script %s", script)
             return 1
         cmd = [py, str(script), "--config", str(cfg_path)]
+        if name == "cur_performance":
+            cmd.append("--no-daily-zip")
         log.info("=== %s ===", name)
         r = subprocess.run(cmd, cwd=str(script.parent), env=env)
         if r.returncode != 0:

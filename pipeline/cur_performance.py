@@ -2,13 +2,16 @@
 """
 Current Performance Data helper.
 
-This is the short/manual entrypoint for the full Current Performance process:
-  1. read the capped main Current Performance workbook and any numbered continuations
-  2. filter the rows directly in Python
-  3. paste filtered Line Board rows into master sheet "OCH Performance"
-  4. paste filtered Amplifier Board rows into master sheet "OAU"
+Daily / intraweek entrypoint for Current Performance:
+  1. unzip any *.zip in pipeline.performance_daily_dir (default: .../raw files/performance_daily/)
+  2. sync extracted workbooks to prepared NMS, then filter rows in Python
+  3. overwrite-paste master "OCH Performance" and "OAU"
+  4. refresh master OTS Span column BU formulas -> current OMSP workbook
+  5. update OMSP OSC sheet from filtered OSC rows
 
+Drop new performance ZIPs in performance_daily/ and run this script (or run.bat is not used).
 Use --build-output only when you also want the huge merged formula workbook.
+Use --no-daily-zip to read only the weekly prepared NMS Current Performance files.
 
 Paths are read from ingest.yml:
   - prepared NMS files come from output_base/week_label/NMS
@@ -69,12 +72,26 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Also build the large merged formula workbook before pasting to master.",
     )
+    parser.add_argument(
+        "--no-daily-zip",
+        action="store_true",
+        help="Skip performance_daily/*.zip; use prepared NMS Current Performance files only.",
+    )
+    parser.add_argument(
+        "--keep-daily-zip",
+        action="store_true",
+        help="Do not move processed ZIPs to performance_daily/processed/ after a successful run.",
+    )
     args = parser.parse_args(argv)
     cfg_path = (args.config or default_config_path()).resolve()
 
     if not args.build_output:
         setup_logging()
-        return run_fast_master_paste(cfg_path)
+        return run_fast_master_paste(
+            cfg_path,
+            use_daily=not args.no_daily_zip,
+            archive_daily=not args.keep_daily_zip,
+        )
 
     forwarded = ["--config", str(cfg_path)]
     if args.template:

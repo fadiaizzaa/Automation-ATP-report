@@ -47,6 +47,7 @@ import xlwings as xw # type: ignore
 from openpyxl import load_workbook # type: ignore
 from openpyxl.utils import get_column_letter, column_index_from_string # type: ignore
 
+from excel_refs import external_ref, fill_formula_column, force_excel_calculate, restore_workbook_from_backup
 from pipeline_config import (
     WB_OCH_COMPUTED,
     WB_OMS_COMPUTED,
@@ -59,6 +60,8 @@ from pipeline_config import (
 log = logging.getLogger("master_updater")
 
 OCH_ROUTES_SHEET = "OCh Routes"
+OCH_COUNT_SHEET = "OCh Count"
+FIBER_OCH_SHEET = "OCh"
 OMS_ROUTES_SHEET = "OMS Routes"
 OMS_TRAILS_SHEET = "OMS Trails"
 
@@ -226,20 +229,48 @@ def update_lib_from_oms_t(wb: xw.Book) -> int:
     return len(rows_to_write)
 
 
+def formula_och_count_h(row: int, och_ref: str) -> str:
+    return f"=INDEX({och_ref}$H:$H,MATCH(A{row},{och_ref}$D:$D,0))"
+
+
+def refresh_och_count_column_h(
+    wb: xw.Book,
+    fiber_computed_path: Path,
+    data_start: int,
+    och_row_count: int,
+) -> None:
+    if och_row_count <= 0:
+        return
+    if not fiber_computed_path.is_file():
+        log.warning("Fiber computed workbook missing; skipping OCh Count column H refresh.")
+        return
+
+    och_ref = external_ref(fiber_computed_path, FIBER_OCH_SHEET)
+    ws = wb.sheets[OCH_COUNT_SHEET]
+    last_row = max(ws.used_range.last_cell.row, data_start + och_row_count - 1)
+    fill_formula_column(ws, "H", last_row, formula_och_count_h(data_start, och_ref), start_row=data_start)
+    log.info("  OCh Count column H refreshed -> %s rows %s:%s", FIBER_OCH_SHEET, data_start, last_row)
+
+
 def force_recalc(output_path: Path):
     log.info("   Opening master for recalculation …")
     app = xw.App(visible=False, add_book=False)
     app.display_alerts = False
     app.screen_updating = False
+    wb = None
     try:
-        _wb = app.books.open(str(output_path))
-        app.calculate()
-        _wb.save()
-        _wb.close()
+        wb = app.books.open(str(output_path), update_links=False)
+        force_excel_calculate(app, wb)
+        wb.save()
         log.info("   Recalculation done ✓")
     except Exception as e:
         log.warning("   Recalc failed: %s — open the file and press Ctrl+S once.", e)
     finally:
+        if wb is not None:
+            try:
+                wb.close()
+            except Exception:
+                pass
         try:
             app.screen_updating = True
             app.quit()
@@ -315,7 +346,8 @@ def run(config_path: Path) -> int:
     oms_path = paths.oms_computed_out
     log.info("Master workbook path: %s", master_path)
 
-    for p in (master_path, och_path, oms_path):
+    fiber_path = paths.fiber_computed_out
+    for p in (master_path, och_path, oms_path, fiber_path):
         if not p.exists():
             log.error("File not found: %s", p)
             return 1
@@ -370,10 +402,11 @@ def run(config_path: Path) -> int:
 
     pipe = cfg.get("pipeline") if isinstance(cfg.get("pipeline"), dict) else {}
     make_backup = pipe.get("make_master_backup", True)
+    backup_path: Path | None = None
     if make_backup:
-        backup = master_path.with_stem(master_path.stem + "_BACKUP")
-        shutil.copy2(master_path, backup)
-        log.info("Backup → %s", backup.name)
+        backup_path = master_path.with_stem(master_path.stem + "_BACKUP")
+        shutil.copy2(master_path, backup_path)
+        log.info("Backup → %s", backup_path.name)
 
     log.info("Opening master in Excel: %s …", master_path.name)
     app = xw.App(visible=False, add_book=False)
@@ -384,17 +417,20 @@ def run(config_path: Path) -> int:
     OMS_T_START = 4
 
     try:
-        wb = app.books.open(str(master_path))
+        wb = app.books.open(str(master_path), update_links=False)
 
         log.info("Pasting → OCh Count …")
-        sht = wb.sheets["OCh Count"]
+        sht = wb.sheets[OCH_COUNT_SHEET]
+        och_n = 0
 
         if och_routes:
-            n = len(och_routes)
-            clear_cols(sht, ["A", "B", "C", "D", "G"], DATA_START, n)
+            och_n = len(och_routes)
+            clear_cols(sht, ["A", "B", "C", "D", "G"], DATA_START, och_n)
             paste_block(sht, och_routes, r1, r4, "A", DATA_START)
             paste_single_col(sht, och_routes, span_i, "G", DATA_START)
-            log.info("  OCh Routes → A–D, G : %s rows", n)
+            log.info("  OCh Routes → A–D, G : %s rows", och_n)
+
+        refresh_och_count_column_h(wb, paths.fiber_computed_out, DATA_START, och_n)
 
         if oms_routes:
             n = len(oms_routes)
@@ -448,6 +484,8 @@ def run(config_path: Path) -> int:
         log.info("Done → %s", master_path.resolve())
         return 0
     except Exception as e:
+        if backup_path is not None and restore_workbook_from_backup(backup_path, master_path):
+            log.error("Restored master workbook from backup after failure.")
         log.error("Error: %s", e)
         raise
     finally:

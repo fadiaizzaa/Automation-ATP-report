@@ -45,6 +45,7 @@ import openpyxl # type: ignore
 import xlwings as xw # type: ignore
 from openpyxl import load_workbook # type: ignore
 
+from excel_refs import force_excel_calculate, force_recalc_file
 from pipeline_config import (
     build_pipeline_paths,
     default_config_path,
@@ -452,7 +453,8 @@ def refresh_master_references(
         fill_formula_column(ws, "M", last_row, formula_m(3, card_ref))
         fill_formula_column(ws, "P", last_row, formula_p(3, card_ref))
 
-        app.calculate()
+        log.info("Force recalculating master after card-report formulas ...")
+        force_excel_calculate(app, wb)
         wb.save()
         log.info("Master saved.")
     finally:
@@ -484,6 +486,8 @@ def run(config_path: Path) -> int:
         all_fiber_path = paths.output_base / f"{paths.week_label}_All Fiber.xlsx"
 
     sheet_name = process_card_report(card_input, card_output)
+    log.info("Recalculating card report computed workbook ...")
+    force_recalc_file(card_output)
     attenuation_rows = read_optical_attenuation_rows(attenuation_input)
     sfp_dap_rows, sfp_md40_rows = read_sfp_rows(sfp_input)
     refresh_master_references(

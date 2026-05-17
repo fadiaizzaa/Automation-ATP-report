@@ -219,7 +219,9 @@ def force_recalculate_workbooks(paths: list[Path]) -> None:
     """
     Open each workbook in Excel, full calculate, save — refreshes cached values
     so openpyxl ``data_only`` reads in downstream steps are not empty.
-    """
+
+    If Excel is unavailable, logs a warning and returns (does not abort prepare).
+  """
     targets = [
         p.resolve()
         for p in paths
@@ -228,8 +230,9 @@ def force_recalculate_workbooks(paths: list[Path]) -> None:
     if not targets:
         log.info("No Excel outputs to recalculate.")
         return
+
     try:
-        import xlwings as xw
+        from excel_refs import excel_session, force_excel_calculate
     except ImportError:
         log.warning(
             "xlwings not installed — skipping Excel recalc on prepared files. "
@@ -238,25 +241,24 @@ def force_recalculate_workbooks(paths: list[Path]) -> None:
         return
 
     log.info("Recalculating %d workbook(s) in Excel …", len(targets))
-    app = xw.App(visible=False, add_book=False)
-    app.display_alerts = False
-    app.screen_updating = False
     try:
-        for p in targets:
-            log.info("  Recalc: %s", p.name)
-            wb = app.books.open(str(p), update_links=False)
-            try:
-                app.api.CalculateFullRebuild()
-            except Exception:
-                app.calculate()
-            wb.save()
-            wb.close()
-        log.info("Excel recalculation finished.")
+        with excel_session() as app:
+            for p in targets:
+                log.info("  Recalc: %s", p.name)
+                wb = app.books.open(str(p), update_links=False)
+                try:
+                    force_excel_calculate(app, wb)
+                    wb.save()
+                finally:
+                    wb.close()
+            log.info("Excel recalculation finished.")
     except Exception as e:
-        log.warning("Excel recalc failed (%s). Downstream steps may see empty formula cells.", e)
-    finally:
-        app.screen_updating = True
-        app.quit()
+        log.warning(
+            "Excel recalc skipped (%s). Downstream steps may see empty formula cells. "
+            "Ensure Microsoft Excel is installed (open it once), close all Excel windows, "
+            "or re-run: python prepare_week_inputs.py --config ... --skip-excel-recalc",
+            e,
+        )
 
 
 def process_cpq(

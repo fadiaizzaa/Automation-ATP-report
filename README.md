@@ -62,7 +62,7 @@ run.bat
 python pipeline\run\run_week_pipeline.py --config config\ingest.yml
 ```
 
-Steps: seed artifacts → prepare inputs → validate → Fiber → OMS → OCh → paste CPQ → SRR → update All Fiber → paste NMS.
+Steps: seed artifacts → prepare inputs → validate → Fiber → OMS → OCh → paste CPQ → SRR → update All Fiber → paste NMS → current performance.
 
 ### Individual steps
 
@@ -73,10 +73,21 @@ python pipeline\cpq\nrr_fiber.py --config config\ingest.yml
 
 Many scripts default to `config\ingest.yml` when `--config` is omitted.
 
-### Manual helpers (not in `run_week_pipeline.py`)
+### Daily Current Performance
+
+Drop intraweek ZIP(s) in `{output_base}/input/raw files/performance_daily/`, then:
 
 ```bash
+cur_performance.bat
+# or
 python pipeline\cur_performance.py --config config\ingest.yml
+```
+
+The full weekly pipeline already runs current performance from the prepared weekly NMS files. This manual helper is only for intraweek refreshes: it extracts ZIPs, syncs NMS performance workbooks, overwrites master **OCH Performance** / **OAU**, refreshes master **BU** formulas to the current `dwdm_omsp_output`, and updates OMSP **OSC**. Processed ZIPs move to `performance_daily/processed/`. Use `--no-daily-zip` to use only the weekly prepared NMS files.
+
+### Other manual helpers
+
+```bash
 python pipeline\cpq\lib_updater.py --config config\ingest.yml
 ```
 
@@ -113,7 +124,7 @@ Copy [`config/ingest.example.yml`](config/ingest.example.yml) to `config/ingest.
 - **Config not found:** `config/ingest.yml` missing — copy from `ingest.example.yml`.
 - **Import errors:** use `run.bat` or set `PYTHONPATH` like the batch file.
 - **Excel / COM errors:** close workbooks; re-run; `update_all_fiber` / `pasting_nms` exit 1 if Excel recalc fails.
-- **Stale OMSP links:** `update_all_fiber` runs before `pasting_nms` in `run_week_pipeline.py`.
+- **Stale OMSP links:** `update_all_fiber` runs before `pasting_nms`; `cur_performance` runs last in `run_week_pipeline.py`.
 
 ## License / project
 

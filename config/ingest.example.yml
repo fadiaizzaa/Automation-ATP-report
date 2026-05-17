@@ -24,6 +24,7 @@ pipeline:
   dwdm_omsp_output: "{output_base}/{week_label}_OMSP_DWDMEvaluation.xlsx"
   current_performance_output: "{output_base}/output/{week_label}_Current_Performance_Data_output.xlsx"
   card_report_computed: "{output_base}/computed/{week_label}_Card_Report_computed.xlsx"
+  performance_daily_dir: "{output_base}/input/raw files/performance_daily"
   # Optional: explicit previous NRR path. If omitted, resolved from previous_week_label + prepared CPQ layout.
   # previous_network_resource_workbook: "{path}/{previous_week_label}/input/CPQ/{previous_week_label}_Network Resource Statistics.xlsm"
 

@@ -30,6 +30,8 @@ import logging
 import re
 import shutil
 import sys
+import tempfile
+import zipfile
 from copy import copy
 from datetime import date, datetime, time
 from pathlib import Path
@@ -40,6 +42,13 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.cell import WriteOnlyCell
 from openpyxl.worksheet.formula import ArrayFormula
 
+from excel_refs import (
+    excel_session,
+    external_ref,
+    fill_formula_column,
+    force_excel_calculate,
+    restore_workbook_from_backup,
+)
 from pipeline_config import build_pipeline_paths, expand_config_value, load_yaml, resolve_under
 
 
@@ -97,6 +106,11 @@ FILTER_OSC_PATTERNS = ["*ST*", "*SC*"]
 OCH_PERFORMANCE_SHEET = "OCH Performance"
 OAU_SHEET = "OAU"
 OSC_SHEET = "OSC"
+OMSP_TEMPLATE_SHEET = "TemplateForSystem (2)"
+MASTER_OMSP_BU_SHEET = "OTS Span Band Based"
+MASTER_OMSP_BU_COL = "BU"
+MASTER_OMSP_BU_MATCH_COL = "BG"
+MASTER_OMSP_BU_START_ROW = 3
 OCH_PASTE_START_ROW = 7
 OAU_PASTE_START_ROW = 6
 OSC_PASTE_START_ROW = 3
@@ -225,8 +239,132 @@ def output_default(config_path: Path, week_label: str) -> Path:
     return config_path.parent / "outputs" / f"{week_label}_Current_Performance_Data_output.xlsx"
 
 
-def performance_paths(config_path: Path) -> tuple[dict, list[Path]]:
-    cfg = load_yaml(config_path)
+def is_performance_variant(stem: str) -> bool:
+    s = stem.lower()
+    return "@1" in s or s.endswith("_1")
+
+
+def safe_extract_zip(zip_path: Path, dest: Path) -> None:
+    dest = dest.resolve()
+    with zipfile.ZipFile(zip_path) as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            target = (dest / info.filename).resolve()
+            try:
+                target.relative_to(dest)
+            except ValueError as e:
+                raise RuntimeError(f"Unsafe path in archive {zip_path.name}: {info.filename!r}") from e
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(info, "r") as src, target.open("wb") as out:
+                shutil.copyfileobj(src, out)
+
+
+def list_workbooks(root: Path, suffixes: tuple[str, ...]) -> list[Path]:
+    out: list[Path] = []
+    for path in root.rglob("*"):
+        if path.is_file() and path.suffix.lower() in suffixes and not path.name.startswith("~$"):
+            out.append(path)
+    return sorted(out, key=lambda p: str(p).lower())
+
+
+def extract_performance_xlsx_from_zip(zip_path: Path, dest: Path) -> list[Path]:
+    safe_extract_zip(zip_path, dest)
+    xs = list_workbooks(dest, (".xlsx",))
+    if not xs:
+        raise RuntimeError(f"Performance ZIP has no .xlsx: {zip_path.name}")
+    return sorted(xs, key=lambda p: (is_performance_variant(p.stem), p.name.lower()))
+
+
+def performance_daily_dir(cfg: dict, config_path: Path) -> Path:
+    pipe = cfg.get("pipeline") if isinstance(cfg.get("pipeline"), dict) else {}
+    raw = pipe.get("performance_daily_dir")
+    if isinstance(raw, str) and raw.strip():
+        return resolve_under(config_path.parent, expand_config_value(raw.strip(), cfg))
+    paths = build_pipeline_paths(cfg, config_path)
+    return paths.output_base / "input" / "raw files" / "performance_daily"
+
+
+def sync_performance_workbooks_to_nms(xlsx_files: list[Path], nms_dir: Path, week_label: str) -> None:
+    nms_dir.mkdir(parents=True, exist_ok=True)
+    for idx, src in enumerate(xlsx_files):
+        suffix = "" if idx == 0 else f"_{idx}"
+        dest = nms_dir / f"{week_label}_Current Performance Data{suffix}.xlsx"
+        shutil.copy2(src, dest)
+        log.info("Synced performance workbook -> %s", dest.name)
+
+
+def archive_processed_daily_zips(daily_dir: Path, zips: list[Path]) -> None:
+    if not zips:
+        return
+    processed_dir = daily_dir / "processed"
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    for zpath in zips:
+        target = processed_dir / zpath.name
+        if target.exists():
+            stem = zpath.stem
+            for i in range(2, 1000):
+                candidate = processed_dir / f"{stem}_{i}{zpath.suffix}"
+                if not candidate.exists():
+                    target = candidate
+                    break
+        shutil.move(str(zpath), str(target))
+        log.info("Archived daily ZIP -> %s", target.name)
+
+
+def ingest_daily_performance_zips(
+    cfg: dict,
+    config_path: Path,
+    *,
+    archive: bool = True,
+) -> list[Path] | None:
+    """
+    Extract the newest ZIP in performance_daily_dir (one main + optional _1 pair).
+    Returns ordered .xlsx paths, or None if the folder has no ZIPs.
+    """
+    daily_dir = performance_daily_dir(cfg, config_path)
+    if not daily_dir.is_dir():
+        return None
+
+    zips = sorted(daily_dir.glob("*.zip"), key=lambda p: p.stat().st_mtime)
+    if not zips:
+        return None
+
+    latest_zip = zips[-1]
+    if len(zips) > 1:
+        log.warning(
+            "%s daily performance ZIP(s) found; using newest only: %s",
+            len(zips),
+            latest_zip.name,
+        )
+
+    paths = build_pipeline_paths(cfg, config_path)
+    with tempfile.TemporaryDirectory(prefix="perf_daily_") as tmp:
+        collected = extract_performance_xlsx_from_zip(latest_zip, Path(tmp))
+
+    if not collected:
+        raise RuntimeError(f"No performance workbooks extracted from {latest_zip.name}")
+
+    if len(collected) != 2:
+        log.warning(
+            "Expected 2 performance workbooks in %s, got %s; using first two if available.",
+            latest_zip.name,
+            len(collected),
+        )
+        collected = collected[:2]
+
+    sync_performance_workbooks_to_nms(collected, paths.nms_week_dir, paths.week_label)
+    log.info(
+        "Ingested daily performance ZIP %s -> %s workbook(s) under NMS",
+        latest_zip.name,
+        len(collected),
+    )
+    if archive:
+        archive_processed_daily_zips(daily_dir, zips)
+    return collected
+
+
+def prepared_performance_paths(cfg: dict, config_path: Path) -> list[Path]:
     paths = build_pipeline_paths(cfg, config_path)
     main = paths.nms_week_dir / f"{paths.week_label}_Current Performance Data.xlsx"
     if not main.is_file():
@@ -243,7 +381,26 @@ def performance_paths(config_path: Path) -> tuple[dict, list[Path]]:
         if match:
             continuations.append((int(match.group(1)), path))
 
-    return cfg, [main] + [path for _, path in sorted(continuations)]
+    return [main] + [path for _, path in sorted(continuations)]
+
+
+def resolve_performance_files(
+    cfg: dict,
+    config_path: Path,
+    *,
+    use_daily: bool = True,
+    archive_daily: bool = True,
+) -> list[Path]:
+    if use_daily:
+        daily_files = ingest_daily_performance_zips(cfg, config_path, archive=archive_daily)
+        if daily_files:
+            return daily_files
+    return prepared_performance_paths(cfg, config_path)
+
+
+def performance_paths(config_path: Path) -> tuple[dict, list[Path]]:
+    cfg = load_yaml(config_path)
+    return cfg, resolve_performance_files(cfg, config_path)
 
 
 def optional_pipeline_path(cfg: dict, config_path: Path, key: str) -> Path | None:
@@ -432,39 +589,91 @@ def paste_rows(sheet: xw.Sheet, start_cell: str, rows: list[list[object]], width
         target.value = chunk
 
 
-def update_master_performance(master_path: Path, och_rows: list[list[object]], oau_rows: list[list[object]]) -> None:
+def _paste_master_performance_sheets(
+    wb: xw.Book,
+    och_rows: list[list[object]],
+    oau_rows: list[list[object]],
+) -> None:
+    ws_och = wb.sheets[OCH_PERFORMANCE_SHEET]
+    och_used_last = max(ws_och.used_range.last_cell.row, OCH_PASTE_START_ROW)
+    ws_och.range(f"C{OCH_PASTE_START_ROW}:J{och_used_last}").clear_contents()
+    paste_rows(ws_och, f"C{OCH_PASTE_START_ROW}", och_rows)
+    log.info("  Pasted %s rows -> %s C:J", len(och_rows), OCH_PERFORMANCE_SHEET)
+
+    ws_oau = wb.sheets[OAU_SHEET]
+    oau_used_last = max(ws_oau.used_range.last_cell.row, OAU_PASTE_START_ROW)
+    ws_oau.range(f"A{OAU_PASTE_START_ROW}:H{oau_used_last}").clear_contents()
+    paste_rows(ws_oau, f"A{OAU_PASTE_START_ROW}", oau_rows)
+    log.info("  Pasted %s rows -> %s A:H", len(oau_rows), OAU_SHEET)
+
+
+def _refresh_master_omsp_bu_on_workbook(wb: xw.Book, omsp_path: Path) -> None:
+    omsp_ref = external_ref(omsp_path, OMSP_TEMPLATE_SHEET)
+    ws = wb.sheets[MASTER_OMSP_BU_SHEET]
+    last_row = max(ws.used_range.last_cell.row, MASTER_OMSP_BU_START_ROW)
+    fill_formula_column(
+        ws,
+        MASTER_OMSP_BU_COL,
+        last_row,
+        formula_master_bu(MASTER_OMSP_BU_START_ROW, omsp_ref),
+        start_row=MASTER_OMSP_BU_START_ROW,
+    )
+    log.info(
+        "  Master %s!%s refreshed rows %s:%s",
+        MASTER_OMSP_BU_SHEET,
+        MASTER_OMSP_BU_COL,
+        MASTER_OMSP_BU_START_ROW,
+        last_row,
+    )
+
+
+def apply_master_performance_updates(
+    master_path: Path,
+    och_rows: list[list[object]],
+    oau_rows: list[list[object]],
+    omsp_path: Path | None = None,
+    *,
+    paste_performance: bool = True,
+) -> None:
+    """Open master once: paste performance data, optional BU refresh, recalc, save."""
     log.info("Updating master performance sheets: %s", master_path)
-    app = xw.App(visible=False, add_book=False)
-    app.display_alerts = False
-    app.screen_updating = False
-    wb = None
-    try:
+    with excel_session() as app:
         wb = app.books.open(str(master_path), update_links=False)
+        try:
+            if paste_performance:
+                _paste_master_performance_sheets(wb, och_rows, oau_rows)
+            if omsp_path is not None:
+                if not omsp_path.is_file():
+                    raise FileNotFoundError(f"Missing OMSP/DWDM workbook for BU refresh: {omsp_path}")
+                log.info("Refreshing master %s column %s -> %s", MASTER_OMSP_BU_SHEET, MASTER_OMSP_BU_COL, omsp_path.name)
+                _refresh_master_omsp_bu_on_workbook(wb, omsp_path)
+            log.info("Recalculating master formulas ...")
+            force_excel_calculate(app, wb)
+            wb.save()
+            log.info("Master saved.")
+        finally:
+            wb.close()
 
-        ws_och = wb.sheets[OCH_PERFORMANCE_SHEET]
-        och_used_last = max(ws_och.used_range.last_cell.row, OCH_PASTE_START_ROW)
-        ws_och.range(f"C{OCH_PASTE_START_ROW}:J{och_used_last}").clear_contents()
-        paste_rows(ws_och, f"C{OCH_PASTE_START_ROW}", och_rows)
-        log.info("  Pasted %s rows -> %s C:J", len(och_rows), OCH_PERFORMANCE_SHEET)
 
-        ws_oau = wb.sheets[OAU_SHEET]
-        oau_used_last = max(ws_oau.used_range.last_cell.row, OAU_PASTE_START_ROW)
-        ws_oau.range(f"A{OAU_PASTE_START_ROW}:H{oau_used_last}").clear_contents()
-        paste_rows(ws_oau, f"A{OAU_PASTE_START_ROW}", oau_rows)
-        log.info("  Pasted %s rows -> %s A:H", len(oau_rows), OAU_SHEET)
+def update_master_performance(master_path: Path, och_rows: list[list[object]], oau_rows: list[list[object]]) -> None:
+    apply_master_performance_updates(master_path, och_rows, oau_rows, omsp_path=None)
 
-        log.info("Recalculating master formulas ...")
-        app.calculate()
-        wb.save()
-        log.info("Master saved.")
-    finally:
-        if wb is not None:
-            try:
-                wb.close()
-            except Exception:
-                pass
-        app.screen_updating = True
-        app.quit()
+
+def formula_master_bu(row: int, omsp_ref: str) -> str:
+    return (
+        f"=IFERROR(INDEX({omsp_ref}$AB:$AB,MATCH({MASTER_OMSP_BU_MATCH_COL}{row},{omsp_ref}$D:$D,0)),"
+        f"INDEX({omsp_ref}$AC:$AC,MATCH({MASTER_OMSP_BU_MATCH_COL}{row},{omsp_ref}$C:$C,0)))"
+    )
+
+
+def refresh_master_omsp_bu_column(master_path: Path, omsp_path: Path) -> None:
+    apply_master_performance_updates(
+        master_path,
+        [],
+        [],
+        omsp_path=omsp_path,
+        paste_performance=False,
+    )
 
 
 def optional_omsp_path(cfg: dict, config_path: Path) -> Path | None:
@@ -479,51 +688,65 @@ def update_omsp_osc_performance(omsp_path: Path | None, osc_rows: list[list[obje
         raise FileNotFoundError(f"Missing OMSP/DWDM workbook: {omsp_path}")
 
     log.info("Updating OMSP OSC sheet: %s", omsp_path)
-    app = xw.App(visible=False, add_book=False)
-    app.display_alerts = False
-    app.screen_updating = False
-    wb = None
-    try:
+    with excel_session() as app:
         wb = app.books.open(str(omsp_path), update_links=False)
-        ws = wb.sheets[OSC_SHEET]
-        used_last = max(ws.used_range.last_cell.row, OSC_PASTE_START_ROW)
-        ws.range(f"C{OSC_PASTE_START_ROW}:I{used_last}").clear_contents()
-        if used_last > OSC_PASTE_START_ROW:
-            ws.range(f"J{OSC_PASTE_START_ROW + 1}:Q{used_last}").clear_contents()
-        paste_rows(ws, f"C{OSC_PASTE_START_ROW}", osc_rows, width=7)
-        if len(osc_rows) > 1:
-            last_row = OSC_PASTE_START_ROW + len(osc_rows) - 1
-            formula_source = ws.range(f"J{OSC_PASTE_START_ROW}:Q{OSC_PASTE_START_ROW}")
-            formula_target = ws.range(f"J{OSC_PASTE_START_ROW}:Q{last_row}")
-            formula_source.api.AutoFill(formula_target.api)
-        app.calculate()
-        wb.save()
-        log.info("  Pasted %s rows -> %s C:I", len(osc_rows), OSC_SHEET)
-    finally:
-        if wb is not None:
-            try:
-                wb.close()
-            except Exception:
-                pass
-        app.screen_updating = True
-        app.quit()
+        try:
+            ws = wb.sheets[OSC_SHEET]
+            used_last = max(ws.used_range.last_cell.row, OSC_PASTE_START_ROW)
+            ws.range(f"C{OSC_PASTE_START_ROW}:I{used_last}").clear_contents()
+            if used_last > OSC_PASTE_START_ROW:
+                ws.range(f"J{OSC_PASTE_START_ROW + 1}:Q{used_last}").clear_contents()
+            paste_rows(ws, f"C{OSC_PASTE_START_ROW}", osc_rows, width=7)
+            if len(osc_rows) > 1:
+                last_row = OSC_PASTE_START_ROW + len(osc_rows) - 1
+                formula_source = ws.range(f"J{OSC_PASTE_START_ROW}:Q{OSC_PASTE_START_ROW}")
+                formula_target = ws.range(f"J{OSC_PASTE_START_ROW}:Q{last_row}")
+                formula_source.api.AutoFill(formula_target.api)
+            app.calculate()
+            wb.save()
+            log.info("  Pasted %s rows -> %s C:I", len(osc_rows), OSC_SHEET)
+        finally:
+            wb.close()
 
 
-def run_fast_master_paste(config_path: Path) -> int:
-    cfg, performance_files = performance_paths(config_path)
+def run_fast_master_paste(
+    config_path: Path,
+    *,
+    use_daily: bool = True,
+    archive_daily: bool = True,
+) -> int:
+    cfg = load_yaml(config_path)
+    performance_files = resolve_performance_files(
+        cfg,
+        config_path,
+        use_daily=use_daily,
+        archive_daily=archive_daily,
+    )
     paths = build_pipeline_paths(cfg, config_path)
     pipe = cfg.get("pipeline") if isinstance(cfg.get("pipeline"), dict) else {}
+    omsp_path = optional_omsp_path(cfg, config_path)
 
-    log.info("Fast mode: filtering raw Current Performance files directly.")
+    log.info("Fast mode: filtering Current Performance files (%s workbook(s)).", len(performance_files))
     och_rows, oau_rows, osc_rows = collect_filtered_rows(performance_files)
 
+    master_backup: Path | None = None
     if pipe.get("make_master_backup", True):
-        backup = backup_path_for(paths.master_workbook, "_BACKUP")
-        shutil.copy2(paths.master_workbook, backup)
-        log.info("Master backup -> %s", backup.name)
+        master_backup = backup_path_for(paths.master_workbook, "_BACKUP")
+        shutil.copy2(paths.master_workbook, master_backup)
+        log.info("Master backup -> %s", master_backup.name)
 
-    update_master_performance(paths.master_workbook, och_rows, oau_rows)
-    update_omsp_osc_performance(optional_omsp_path(cfg, config_path), osc_rows)
+    try:
+        apply_master_performance_updates(
+            paths.master_workbook,
+            och_rows,
+            oau_rows,
+            omsp_path=omsp_path,
+        )
+        update_omsp_osc_performance(omsp_path, osc_rows)
+    except Exception:
+        if master_backup is not None and restore_workbook_from_backup(master_backup, paths.master_workbook):
+            log.error("Restored master workbook from backup after failure.")
+        raise
     return 0
 
 
@@ -630,12 +853,26 @@ def main(argv: list[str] | None = None) -> int:
         )
         verify_output(output_path, performance_files)
         pipe = cfg.get("pipeline") if isinstance(cfg.get("pipeline"), dict) else {}
+        master_backup: Path | None = None
         if pipe.get("make_master_backup", True):
-            backup = backup_path_for(paths.master_workbook, "_BACKUP")
-            shutil.copy2(paths.master_workbook, backup)
-            log.info("Master backup -> %s", backup.name)
-        update_master_performance(paths.master_workbook, och_rows, oau_rows)
-        update_omsp_osc_performance(optional_omsp_path(cfg, config_path), osc_rows)
+            master_backup = backup_path_for(paths.master_workbook, "_BACKUP")
+            shutil.copy2(paths.master_workbook, master_backup)
+            log.info("Master backup -> %s", master_backup.name)
+        omsp_path = optional_omsp_path(cfg, config_path)
+        try:
+            apply_master_performance_updates(
+                paths.master_workbook,
+                och_rows,
+                oau_rows,
+                omsp_path=omsp_path,
+            )
+            update_omsp_osc_performance(omsp_path, osc_rows)
+        except Exception:
+            if master_backup is not None and restore_workbook_from_backup(
+                master_backup, paths.master_workbook
+            ):
+                log.error("Restored master workbook from backup after failure.")
+            raise
         return 0
     except Exception:
         log.exception("build_current_performance_output failed")

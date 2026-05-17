@@ -106,6 +106,29 @@ Folders `input\CPQ`, `input\NMS`, and `computed` are created automatically — y
 
 ---
 
+## Daily Current Performance (optional)
+
+If your team updates performance metrics during the week:
+
+1. Close Excel.
+2. Copy new performance export ZIP(s) into:
+
+   ```text
+   ATP NMS\Week 20\input\raw files\performance_daily\
+   ```
+
+3. Run **`cur_performance.bat`** if provided, or ask technical staff to run:
+
+   ```text
+   python pipeline\cur_performance.py --config config\ingest.yml
+   ```
+
+4. Processed ZIPs are moved to `performance_daily\processed\`.
+
+The weekly `run.bat` pipeline already updates current performance from `performance.zip`. This optional step is only for refreshing performance again during the week.
+
+---
+
 ## What you should never do
 
 - Do not rename files inside `input\CPQ` or `input\NMS` after the pipeline runs.

@@ -282,7 +282,7 @@ def force_recalc(output_path: Path) -> None:
     app.display_alerts = False
     app.screen_updating = False
     try:
-        wb = app.books.open(str(output_path))
+        wb = app.books.open(str(output_path), update_links=False)
         app.calculate()
         wb.save()
         wb.close()

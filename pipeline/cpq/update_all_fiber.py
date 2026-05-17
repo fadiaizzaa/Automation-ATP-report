@@ -37,7 +37,9 @@ from pipeline_config import (
     expand_config_value,
     load_yaml,
     prepared_input_root,
+    previous_output_base,
     resolve_under,
+    try_resolve_nms_workbook,
 )
 
 
@@ -293,9 +295,24 @@ def configured_previous_nrr_path(cfg: dict, config_path: Path) -> Path:
     raw = pipe.get("previous_network_resource_workbook")
     if isinstance(raw, str) and raw.strip():
         return resolve_under(config_path.parent, expand_config_value(raw.strip(), cfg))
-    previous_week_label = str(cfg["previous_week_label"]).strip()
+
+    previous_week_label = cfg.get("previous_week_label")
+    if not isinstance(previous_week_label, str) or not previous_week_label.strip():
+        raise ValueError(
+            "Set previous_week_label or pipeline.previous_network_resource_workbook in ingest.yml"
+        )
+    previous_week_label = previous_week_label.strip()
+    week_label = str(cfg["week_label"]).strip()
     output_base = configured_output_base(cfg, config_path.parent)
-    return output_base.parent / previous_week_label / f"{previous_week_label}_Network Resource Statistics.xlsm"
+    prev_cpq = prepared_input_root(
+        previous_output_base(output_base, week_label, previous_week_label)
+    ) / "CPQ"
+    resolved = try_resolve_nms_workbook(prev_cpq, previous_week_label, "Network Resource Statistics")
+    if resolved is None:
+        raise FileNotFoundError(
+            f"Previous Network Resource Statistics not found under {prev_cpq}"
+        )
+    return resolved
 
 
 def external_excel_ref(path: Path, sheet_name: str, cell_or_range: str) -> str:
@@ -305,13 +322,33 @@ def external_excel_ref(path: Path, sheet_name: str, cell_or_range: str) -> str:
     return f"'{folder}[{path.name}]{sheet_name}'!{cell_or_range}"
 
 
-def collect_overlay_output_rows(ws) -> list[tuple[object, object, object]]:
+def collect_overlay_output_rows(
+    ws,
+    *,
+    scan_through_row: int | None = None,
+) -> list[tuple[object, object, object]]:
+    """
+    Read calculated Overlay outputs from columns E, J, K (cols 5, 10, 11).
+
+    Uses row streaming instead of per-cell access. ``scan_through_row`` caps how far
+    we read — important when ``ws.max_row`` is inflated by the large report sheet.
+    """
+    last_row = scan_through_row if scan_through_row is not None else ws.max_row
+    if last_row < OVERLAY_DATA_ROW:
+        return []
+
     rows: list[tuple[object, object, object]] = []
     empty_streak = 0
-    for row_idx in range(OVERLAY_DATA_ROW, ws.max_row + 1):
-        name = ws.cell(row_idx, 5).value
-        fiu_src = ws.cell(row_idx, 10).value
-        fiu_snk = ws.cell(row_idx, 11).value
+    for row in ws.iter_rows(
+        min_row=OVERLAY_DATA_ROW,
+        max_row=last_row,
+        min_col=5,
+        max_col=11,
+        values_only=True,
+    ):
+        name = row[0]
+        fiu_src = row[5]
+        fiu_snk = row[6]
         if any(value not in (None, "") for value in (name, fiu_src, fiu_snk)):
             rows.append((name, fiu_src, fiu_snk))
             empty_streak = 0
@@ -326,6 +363,8 @@ def copy_overlay_to_omsp(
     all_fiber_path: Path,
     omsp_path: Path,
     previous_nrr_path: Path,
+    *,
+    pink_row_count: int = 0,
 ) -> None:
     log.info("Copying Overlay Names output into OMSP workbook ...")
     if not omsp_path.is_file():
@@ -333,10 +372,19 @@ def copy_overlay_to_omsp(
     if not previous_nrr_path.is_file():
         raise FileNotFoundError(f"Previous NRR workbook not found: {previous_nrr_path}")
 
-    log.info("Reading Overlay Names from %s ...", all_fiber_path.name)
+    scan_through = OVERLAY_DATA_ROW + max(pink_row_count, 0) + 500
+    log.info(
+        "Reading Overlay Names from %s (rows %s–%s) ...",
+        all_fiber_path.name,
+        OVERLAY_DATA_ROW,
+        scan_through,
+    )
     src_wb = load_workbook(all_fiber_path, read_only=True, data_only=True)
     try:
-        overlay_rows = collect_overlay_output_rows(src_wb[OVERLAY_SHEET])
+        overlay_rows = collect_overlay_output_rows(
+            src_wb[OVERLAY_SHEET],
+            scan_through_row=scan_through,
+        )
     finally:
         src_wb.close()
     log.info("Overlay rows ready for OMSP: %s", len(overlay_rows))
@@ -458,7 +506,7 @@ def run(config_path: Path) -> int:
     if not calculate_workbook(all_fiber_path):
         log.error("All Fiber workbook was not recalculated in Excel.")
         return 1
-    copy_overlay_to_omsp(all_fiber_path, omsp_path, previous_nrr_path)
+    copy_overlay_to_omsp(all_fiber_path, omsp_path, previous_nrr_path, pink_row_count=len(pink_rows))
     if not calculate_workbook(omsp_path):
         log.error("OMSP workbook was not recalculated in Excel.")
         return 1
